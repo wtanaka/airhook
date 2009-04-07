@@ -27,7 +27,7 @@
 
 enum { packet_size = 1500 };
 enum { allocation_size = 8192 };
-enum { escape_value = 0xFF };
+enum { escape_value = airhook_size - 1 };
 
 struct owner {
 	unsigned int use_count;
@@ -237,6 +237,7 @@ static void run(
 
 	for (;;) {
 		int i,r;
+		int delay_update = 0;
 		fd_set rfd,wfd;
 		struct airhook_data data;
 		struct airhook_time next;
@@ -509,8 +510,8 @@ static void run(
 				struct memory mem = get_memory(4);
 				const unsigned long len = mem.end - mem.begin;
 				unsigned long max = len - 3;
-				if (max > airhook_size_maximum - 3)
-					max = airhook_size_maximum - 3;
+				if (max > airhook_message_size - 3)
+					max = airhook_message_size - 3;
 
 				active[i].flags |= is_dirty;
 				r = read(i,3 + mem.begin,max); /* TODO: ??? */
@@ -530,12 +531,15 @@ static void run(
 					active[i].out_head = 
 						inc(active[i].out_head);
 					active[i].out_pending += r;
+					AIRHOOK_ASSERT(active[i].out_head 
+					            != active[i].out_tail);
 
 					++mem.owner->use_count;
 					mem.begin += 3 + r;
 				}
 
 				release_memory(mem);
+				delay_update = 1;
 			}
 
 			if (FD_ISSET(i,&wfd)) {
@@ -567,24 +571,9 @@ static void run(
 				active[i].in_tail = in_tail;
 				release_outgoing(&active[i].handshake);
 				send_handshake(air,i);
+				delay_update = 1;
 			}
                 }
-
-		if (FD_ISSET(udp,&wfd)) {
-			struct airhook_time when;
-			when.second = now.tv_sec;
-			when.nanosecond = now.tv_usec * 1000;
-			r = airhook_transmit(air,when,sizeof(buffer),buffer);
-			if (r > 0) {
-				r = send(udp,buffer,r,0);
-				if (r < 0) {
-                                        if (ECONNREFUSED == errno)
-                                                reset();
-                                        else
-                                                syslog(LOG_WARNING,"send: %m");
-                                }
-			}
-		}
 
 		if (FD_ISSET(udp,&rfd)) {
 			struct airhook_time when;
@@ -603,6 +592,21 @@ static void run(
 					syslog(LOG_WARNING,"invalid packet");
 				else
 					last = now;
+			}
+		}
+		else if (!delay_update && FD_ISSET(udp,&wfd)) {
+			struct airhook_time when;
+			when.second = now.tv_sec;
+			when.nanosecond = now.tv_usec * 1000;
+			r = airhook_transmit(air,when,sizeof(buffer),buffer);
+			if (r > 0) {
+				r = send(udp,buffer,r,0);
+				if (r < 0) {
+                                        if (ECONNREFUSED == errno)
+                                                reset();
+                                        else
+                                                syslog(LOG_WARNING,"send: %m");
+                                }
 			}
 		}
 	}

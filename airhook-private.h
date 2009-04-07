@@ -21,7 +21,7 @@ struct packet {
 	unsigned long session_observed;
 	const unsigned char *missed_begin,*missed_end;
 	unsigned char unsent;
-	struct message data[0x100],*data_end;
+	struct message data[airhook_size],*data_end;
 };
 
 size_t packet_length(const struct packet *in);

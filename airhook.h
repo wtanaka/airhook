@@ -51,7 +51,9 @@ struct airhook_outgoing_status {
 	struct airhook_time last_change;
 };
 
-enum { airhook_size_maximum = 255 };
+enum { airhook_bits = 8 };
+enum { airhook_size = 1 << airhook_bits };
+enum { airhook_message_size = airhook_size - 1 };
 
 struct airhook_socket;
 struct airhook_outgoing;

@@ -13,7 +13,13 @@ static const struct airhook_time forever = { ULONG_MAX, 0 };
 
 enum { ah_session_init, ah_session_sent, ah_session_confirmed };
 
-static inline unsigned char octet(unsigned char c) { return 0xFF & c; }
+static inline unsigned char octet(unsigned char c) { 
+	return (airhook_size - 1) & c; 
+}
+
+static inline unsigned short word(unsigned short s) { 
+	return (airhook_size * airhook_size - 1) & s; 
+}
 
 static void changed_insert(struct airhook_outgoing *out,struct airhook_time t) {
 	out->status.last_change = t;
@@ -144,7 +150,8 @@ void airhook_settings(struct airhook_socket *conn,struct airhook_settings set) {
 }
 
 static inline int is_prior(unsigned short a,unsigned short b) {
-	return ((a - b) & 0xFFFF) > 0xFF;
+	const unsigned short w = word(a - b);
+	return w != octet(w);
 }
 
 static inline int is_between(unsigned char a,unsigned char b,unsigned char c) {
@@ -179,19 +186,26 @@ static struct airhook_time add_time(
 	return r;
 }
 
+static int novel(const struct airhook_socket *conn) {
+	return
+	    conn->sequence_confirmed != octet(conn->sequence + 1)
+	&& (octet(conn->sequence_observed) != conn->last_observed
+	|| (conn->sequence_confirmed != octet(conn->sequence + 2)
+	&& (conn->log[octet(conn->sequence)].unseen != conn->current.unseen
+	||  NULL != first_pending(conn))));
+}
+
 struct airhook_status airhook_status(const struct airhook_socket *conn) {
 	struct airhook_status status = conn->status;
-	struct airhook_outgoing * const pending = first_pending(conn);
 	const struct airhook_record 
 		* const last = &conn->log[octet(conn->sequence)],
 		* const confirmed = &conn->log[conn->sequence_confirmed];
 
 	airhook_magic_check(&conn->magic,"SOCK");
 
-	if ((last->unsent != conn->current.unsent 
-	||   last->unseen != conn->current.unseen
-	||   NULL != pending)
-	&&  conn->sequence_confirmed != octet(conn->sequence + 1))
+	if (novel(conn)
+	&& (last->unseen != conn->current.unseen
+	||  NULL != first_pending(conn)))
 		status.next_transmit = zero_time;
 	else
 	if (ah_confirmed != status.state
@@ -221,7 +235,7 @@ size_t airhook_transmit(
 	airhook_magic_check(&conn->magic,"SOCK");
 
 	pending = first_pending(conn);
-	packet.sequence = (conn->sequence + 1) & 0xFFFF;
+	packet.sequence = word(conn->sequence + 1);
 	packet.sequence_observed = octet(conn->sequence_observed);
 
 	if (ah_confirmed != conn->status.remote_state) {
@@ -232,13 +246,10 @@ size_t airhook_transmit(
 		packet.session_observed = 0;
 	}
 
-	if ((last->unsent == conn->current.unsent 
-	&&   last->unseen == conn->current.unseen
-	&&   packet.sequence_observed == conn->last_observed
-	&&   NULL == pending)
-	||  conn->sequence_confirmed == octet(packet.sequence)) {
+	if (!novel(conn)) {
 		/* We have nothing new to say; just resend the last header. */
 		packet.sequence = conn->sequence;
+		packet.sequence_observed = conn->last_observed;
 		packet.interval = 0;
 		packet.unsent = last->unsent;
 
@@ -321,6 +332,7 @@ int airhook_receive(struct airhook_socket *conn,
 	struct packet packet;
 	struct message *message;
 	struct airhook_record *confirmed,*old_confirmed;
+	const unsigned char *missed;
 	airhook_magic_check(&conn->magic,"SOCK");
 
 	conn->incoming_end = conn->incoming_next = &conn->incoming[0];
@@ -363,8 +375,12 @@ int airhook_receive(struct airhook_socket *conn,
 	} 
 	else if (conn->status.state == ah_pending) 
 		return 0; /* Unknown session */
-        else if (!is_prior(conn->sequence_observed,packet.sequence))
-		return 1; /* Out of order -- not an error, but ignore it */
+	else if (!is_prior(conn->sequence_observed,packet.sequence)) {
+		if (conn->sequence_observed != packet.sequence) return 1;
+		packet.unsent = octet(packet.unsent 
+		                   + (packet.data_end - packet.data));
+		packet.data_end = packet.data;
+	}
 
 	if (packet.session_observed != 0) {
 		/* Ignore messages to a different session. */
@@ -375,7 +391,8 @@ int airhook_receive(struct airhook_socket *conn,
 	}
 
 	if (ah_confirmed == conn->status.state) {
-		if (is_between(conn->sequence + 1,
+		if (is_between(
+			conn->sequence + 1,
 			packet.sequence_observed,
 			conn->sequence_confirmed)) /* Inverse! */
 			return 0;
@@ -407,16 +424,17 @@ int airhook_receive(struct airhook_socket *conn,
 
 	/* Discover any messages we missed. */
 	while (packet.unsent != conn->current.unseen) {
-		AIRHOOK_ASSERT(conn->missed_end < conn->missed + 0x100);
+		AIRHOOK_ASSERT(conn->missed_end < conn->missed + airhook_size);
 		*conn->missed_end++ = conn->current.unseen;
 		conn->current.unseen = octet(conn->current.unseen + 1);
 	}
 
 	/* Retransmit any messages they missed. */
-	while (packet.missed_end != packet.missed_begin) {
-		const unsigned char missed = *--packet.missed_end;
-		struct airhook_outgoing * const out = conn->waiting[missed];
-		if (!is_between(old_confirmed->unsent,missed,confirmed->unsent))
+	missed = packet.missed_end;
+	while (missed != packet.missed_begin) {
+		const unsigned char m = octet(*--missed);
+		struct airhook_outgoing * const out = conn->waiting[m];
+		if (!is_between(old_confirmed->unsent, m, confirmed->unsent))
 			break;
 		if (NULL != out) {
 			from_waiting(out);
@@ -441,16 +459,24 @@ int airhook_receive(struct airhook_socket *conn,
 	/* Record the messages they sent. */
 	for (message = packet.data; message != packet.data_end; ++message) {
 		conn->current.unseen = octet(conn->current.unseen + 1);
-		AIRHOOK_ASSERT(conn->incoming_end < conn->incoming + 0x100);
+		AIRHOOK_ASSERT(conn->incoming_end < conn->incoming + airhook_size);
 		conn->incoming_end->begin = message->begin;
 		conn->incoming_end->end = message->end;
 		++(conn->incoming_end);
 	}
 
 	/* Trigger a response if necessary. */
-	if (confirmed->unseen != conn->current.unseen
-	||  ah_confirmed != conn->status.remote_state)
+	if (ah_confirmed != conn->status.remote_state)
 		conn->status.next_transmit = zero_time;
+	else 
+	if (confirmed->unseen != conn->current.unseen
+	||  packet.missed_begin != packet.missed_end) {
+		struct airhook_time retry = add_time(
+			conn->status.last_transmit,
+			conn->status.settings.retransmit);
+		if (is_before(retry,conn->status.next_transmit))
+			conn->status.next_transmit = retry;
+	}
 
 	return 1;
 }

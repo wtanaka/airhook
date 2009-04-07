@@ -3,8 +3,8 @@
  * under the terms of the GNU General Public License, version 2.
  * See the file COPYING for more details. */
 
-#include "airhook-private.h"
 #include "airhook.h"
+#include "airhook-private.h"
 
 enum {
 	flag_interval = 1,
@@ -47,7 +47,7 @@ static size_t output_sequence(unsigned char *out,
 {
 	size_t length;
 	if (begin == end) return 0;
-	AIRHOOK_ASSERT(end - begin <= 0x100);
+	AIRHOOK_ASSERT(end - begin <= airhook_size);
 
 	length = 1 + end - begin;
 	if (NULL != out) {
@@ -174,7 +174,7 @@ int input_packet(struct packet *out,
 
 	out->data_end = out->data;
 	while (end != begin) {
-		if (out->data_end - out->data == 0x100) return 0;
+		if (out->data_end - out->data == airhook_size) return 0;
 		if (!input_sequence(1,
 			&out->data_end->begin,
 			&out->data_end->end,&begin,end))

@@ -11,6 +11,7 @@
 #include <sys/types.h>
 #include <sys/time.h>
 
+#include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -22,46 +23,60 @@ enum { packet_size = 1500 };
 
 struct message {
 	struct airhook_outgoing outgoing;
-	char data[1 + airhook_size_maximum];
+	char data[airhook_message_size];
 };
 
-int run_airhook(int sock,struct sockaddr_in verify) {
+void send_message(struct airhook_socket *air, 
+	unsigned char *begin, unsigned char *end) 
+{
+	struct airhook_data data;
+	struct message *msg = malloc(sizeof *msg);
+	if (NULL == msg) { perror("malloc"); exit(1); }
+
+	memcpy(msg->data, begin, end - begin);
+	data.begin = msg->data;
+	data.end = msg->data + (end - begin);
+	airhook_init_outgoing(&msg->outgoing, air, data, msg);
+}
+
+int run_airhook(int sock, struct sockaddr_in verify) {
 	unsigned long last_session = 0;
 	struct timeval now;
 	struct airhook_socket air;
-	unsigned char buffer[packet_size];
+	unsigned char output[packet_size];
+	unsigned char input[airhook_message_size], *input_end = input;
 
-	airhook_init(&air,time(NULL));
-	gettimeofday(&now,NULL);
+	airhook_init(&air, time(NULL));
+	gettimeofday(&now, NULL);
 
 	for (;;) {
 		int r;
-		fd_set rfd,wfd;
-		struct timeval tout,*pout = NULL;
+		fd_set rfd, wfd;
+		struct timeval tout, *pout = NULL;
 		struct airhook_data data;
 		struct airhook_status status;
 		struct airhook_outgoing *out;
 
 		FD_ZERO(&rfd);
-		FD_SET(sock,&rfd);
-		FD_SET(0,&rfd);
+		FD_SET(sock, &rfd);
+		FD_SET(0, &rfd);
 
 		FD_ZERO(&wfd);
 		status = airhook_status(&air);
 		if (status.remote_session != last_session) {
-			fprintf(stderr,"airhook: new remote session\n");
+			fprintf(stderr, "airhook: new remote session\n");
 			last_session = status.remote_session;
 		}
 
-		while (airhook_next_incoming(&air,&data)) {
-			fwrite(data.begin,data.end-data.begin,1,stdout);
+		while (airhook_next_incoming(&air, &data)) {
+			fwrite(data.begin, data.end-data.begin, 1, stdout);
 			fflush(stdout);
 		}
 
 		if (now.tv_sec > status.next_transmit.second
 		|| (now.tv_sec == status.next_transmit.second
 		&&  now.tv_usec > status.next_transmit.nanosecond / 1000))
-			FD_SET(sock,&wfd);
+			FD_SET(sock, &wfd);
 		else {
 			tout.tv_sec = status.next_transmit.second;
 			tout.tv_usec = status.next_transmit.nanosecond / 1000;
@@ -76,42 +91,40 @@ int run_airhook(int sock,struct sockaddr_in verify) {
 			}
 		}
 
-		r = select(FD_SETSIZE,&rfd,&wfd,NULL,pout);
+		r = select(FD_SETSIZE, &rfd, &wfd, NULL, pout);
 		if (r < 0) {
 			perror("select");
 			return 1;
 		}
 
-		gettimeofday(&now,NULL);
+		gettimeofday(&now, NULL);
 		if (r == 0) continue;
 
-		if (FD_ISSET(0,&rfd)) {
-			struct message *msg = malloc(sizeof(struct message));
-			if (NULL == msg) {
-				perror("malloc");
-				return 1;
+		if (FD_ISSET(0, &rfd)) {
+			unsigned char *nl, *begin = input;
+			unsigned char * const old = input_end;
+			unsigned char * const limit = input + sizeof(input);
+			input_end = old + read(0, old, limit - old);
+			if (input_end <= old) return 0;
+
+			while ((nl = memchr(begin, '\n', input_end - begin))) {
+				send_message(&air, begin, nl + 1);
+				begin = nl + 1;
 			}
 
-			if (NULL == fgets(msg->data,sizeof(msg->data),stdin))
-				return 0;
+			input_end -= begin - input;
+			memmove(input, begin, input_end - input);
 
-			data.begin = msg->data;
-			data.end = msg->data + strlen(msg->data);
-			airhook_init_outgoing(&msg->outgoing,&air,data,msg);
-		}
-
-		if (FD_ISSET(sock,&wfd)) {
-			struct airhook_time when;
-			when.second = now.tv_sec;
-			when.nanosecond = now.tv_usec * 1000;
-			r = airhook_transmit(&air,when,packet_size,buffer);
-			if (r > 0) {
-				r = send(sock,buffer,r,0);
-				if (r < 0) perror("send");
+			while (input_end - input >= airhook_message_size) {
+				send_message(&air,
+					input, input + airhook_message_size);
+				input_end -= airhook_message_size;
+				memmove(input, input + airhook_message_size, 
+				        input_end - input);
 			}
 		}
 
-		if (FD_ISSET(sock,&rfd)) {
+		if (FD_ISSET(sock, &rfd)) {
 			struct airhook_time when;
 			struct sockaddr_in from;
 			socklen_t fromlen = sizeof(from);
@@ -119,21 +132,31 @@ int run_airhook(int sock,struct sockaddr_in verify) {
 			when.second = now.tv_sec;
 			when.nanosecond = now.tv_usec * 1000;
 			r = recvfrom(sock,
-				buffer,sizeof(buffer),0,
-				(struct sockaddr *) &from,&fromlen);
+				output, sizeof(output), 0,
+				(struct sockaddr *) &from, &fromlen);
 
 			if (r < 0) 
 				perror("recvfrom");
 			else {
 				struct airhook_data data;
-				data.begin = buffer;
-				data.end = r + buffer;
-				if (!airhook_receive(&air,when,data))
-					fprintf(stderr,"invalid packet\n");
+				data.begin = output;
+				data.end = r + output;
+				if (!airhook_receive(&air, when, data))
+					fprintf(stderr, "invalid packet\n");
+			}
+		}
+		else if (FD_ISSET(sock, &wfd)) {
+			struct airhook_time when;
+			when.second = now.tv_sec;
+			when.nanosecond = now.tv_usec * 1000;
+			r = airhook_transmit(&air, when, packet_size, output);
+			if (r > 0) {
+				r = send(sock, output, r, 0);
+				if (r < 0) perror("send");
 			}
 		}
 
-		while (airhook_next_changed(&air,&out)) {
+		while (airhook_next_changed(&air, &out)) {
 			const struct airhook_outgoing_status status =
 				airhook_outgoing_status(out);
 			if (ah_confirmed == status.state) {
@@ -144,9 +167,9 @@ int run_airhook(int sock,struct sockaddr_in verify) {
 	}
 }
 
-int main(int argc,char *argv[]) {
+int main(int argc, char *argv[]) {
 	struct hostent *host;
-	int sock,local,remote;
+	int sock, local, remote;
 	struct sockaddr_in sin;
 
 	if (4 != argc) {
@@ -166,13 +189,13 @@ int main(int argc,char *argv[]) {
 
 	local = atoi(argv[1]);
 	if (local <= 0 || local >= 65536) {
-		fprintf(stderr,"%s: invalid local port\n",argv[1]); 
+		fprintf(stderr, "%s: invalid local port\n", argv[1]); 
 		return 3; 
 	} 
 
 	remote = atoi(argv[3]);
 	if (remote <= 0 || remote >= 65536) {
-		fprintf(stderr,"%s: invalid remote port\n",argv[3]);
+		fprintf(stderr, "%s: invalid remote port\n", argv[3]);
 		return 3;
 	}
 
@@ -185,11 +208,11 @@ int main(int argc,char *argv[]) {
 	sin.sin_family = AF_INET;
 	if (sin.sin_family != host->h_addrtype
 	||  sizeof(sin.sin_addr) != host->h_length) {
-		fprintf(stderr,"%s: wrong address type\n",argv[2]);
+		fprintf(stderr, "%s: wrong address type\n", argv[2]);
 		return 2;
 	}
 
-	sock = socket(PF_INET,SOCK_DGRAM,0);
+	sock = socket(PF_INET, SOCK_DGRAM, 0);
 	if (sock < 0) {
 		perror("socket");
 		return 1;
@@ -197,18 +220,18 @@ int main(int argc,char *argv[]) {
 
 	sin.sin_addr.s_addr = INADDR_ANY;
 	sin.sin_port = htons(local);
-	if (bind(sock,(struct sockaddr *) &sin,sizeof(sin))) {
+	if (bind(sock, (struct sockaddr *) &sin, sizeof(sin))) {
 		perror("bind");
 		return 1;
 	}
 
 	sin.sin_addr = * (struct in_addr *) host->h_addr;
 	sin.sin_port = htons(remote);
-	if (connect(sock,(struct sockaddr *) &sin,sizeof(sin))) {
+	if (connect(sock, (struct sockaddr *) &sin, sizeof(sin))) {
 		perror("connect");
 		return 1;
 	}
 
-	run_airhook(sock,sin);
+	run_airhook(sock, sin);
 	return 1;
 }

@@ -49,16 +49,16 @@ struct airhook_socket {
 	unsigned char sequence_confirmed,push_sequence;
 
 	/* incoming messages */
-	unsigned char missed[0x100],*missed_end;
-	struct airhook_data incoming[0x100],*incoming_end,*incoming_next;
+	unsigned char missed[airhook_size],*missed_end;
+	struct airhook_data incoming[airhook_size],*incoming_end,*incoming_next;
 
 	/* outgoing messages */
 	unsigned char last_observed;
-	struct airhook_outgoing *waiting[0x100];
+	struct airhook_outgoing *waiting[airhook_size];
 	struct airhook_outgoing *last_changed;
 	struct airhook_outgoing *last_outgoing,*first_pending;
 
-	struct airhook_record current,log[0x100];
+	struct airhook_record current,log[airhook_size];
 };
 
 struct airhook_outgoing {
