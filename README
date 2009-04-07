@@ -1,0 +1,73 @@
+Airhook version 1 source distribution, copyright 2001 Dan Egnor
+Please see http://www.airhook.org/ for general information about Airhook.
+------------------------------------------------------------------------------
+
+BUILDING
+
+There's no autoconf or automake or libtool here, just a very simple Makefile 
+you can edit to suit your system.  When you're done, "make" and "make install"
+(or "make install PREFIX=/my/install/prefix") should work.  Let me know at
+egnor-airhook@ofb.net if it doesn't.
+
+PROXY
+
+Unless you're planning to write code against the Airhook library, the
+only interesting program will be "airproxy", which acts as a gateway between
+TCP and Airhook/UDP.  Its usage message ought to be self-explanatory, but 
+here's a simple example describing how you might tunnel an SSH connection:
+
+  [on server machine]
+  airproxy -l 8022 -o 22 &
+
+  [on client machine(s)]
+  airproxy -i 12345 -r serverhost:8022 &
+  ssh -v -p 12345 localhost
+
+Note that a single 'airproxy' is capable of carrying many TCP connections.
+The ports '8022' and '12345' can be anything you want (subject to the usual
+restrictions on reserved ports < 1024).
+
+To amuse yourself, create one SSH-over-Airhook link and one ordinary SSH link.
+Disable your network (e.g. unplug the cable) for a few minutes.  Verify
+that neither link is working (hit Enter, get no response).  Now plug the
+network back in.  The Airhook link should recover within a second or two.
+See how long it takes the other link to wake up again.
+
+INETD
+
+The airproxy program can also run under inetd; to match the above example,
+kill off airproxy and add the following to both machines' /etc/services:
+
+  airssh          8022/udp
+  airssh          12345/tcp
+
+Then add this to the server's /etc/inetd.conf (and HUP inetd):
+
+  airssh  dgram   udp  wait    root    /path/to/airproxy airproxy -o ssh
+
+Then add this to the client's /etc/inetd.conf (and HUP inetd):
+
+  airssh  stream  tcp  nowait  root    /path/to/airproxy airproxy -r serverhost:airssh
+
+Then, as before, you can run "ssh -v -p 12345 localhost" on the client.
+
+NOTES
+
+If you want to tunnel HTTP, you should run a (possibly very simple) HTTP
+proxy on the server and tunnel the link to that from the client.  The client
+side of an HTTP tunnel should not run from inetd, or the rapid creation of
+connections during normal Web activity will cause inetd to conclude that the 
+service is "looping" and disable it.
+
+Be careful with SSH tunnels; since the SSH client doesn't know who it's 
+really connecting to, management of the known_hosts file can be messed up.
+Airhook does not encrypt.  Use Airhook-over-IPsec or SSH-over-Airhook if
+you need authentication or privacy.
+
+If you want to learn how to use the Airhook library, "aircat" is a good
+simple example to start with.
+
+------------------------------------------------------------------------------
+This software comes with ABSOLUTELY NO WARRANTY.  You may redistribute it
+under the terms of the GNU General Public License, version 2.
+See the file COPYING for more details.
