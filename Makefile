@@ -35,7 +35,7 @@ libairhook.a: packet.o protocol.o
 	$(AR) ru $@ $^
 
 clean:
-	$(RM) -r libairhook.a *.o *.lo *.la airtest aircat airproxy .libs
+	$(RM) -r libairhook.a *.o *.lo *.la airtest aircat airproxy looptest .libs
 
 install: all
 	@test -n '$(PREFIX)' || \
